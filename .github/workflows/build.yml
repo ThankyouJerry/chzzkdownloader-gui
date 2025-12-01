@@ -10,28 +10,34 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller
       
       - name: Build with PyInstaller
         run: |
           pyinstaller build.spec
       
+      - name: List dist contents
+        run: |
+          dir dist
+      
       - name: Create ZIP archive
         run: |
-          Compress-Archive -Path dist/ChzzkDownloader -DestinationPath ChzzkDownloader-Windows.zip
+          Compress-Archive -Path dist\ChzzkDownloader\* -DestinationPath ChzzkDownloader-Windows.zip
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ChzzkDownloader-Windows
           path: ChzzkDownloader-Windows.zip
@@ -39,38 +45,38 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pyinstaller
       
       - name: Build with PyInstaller
         run: |
           pyinstaller build.spec
       
-      - name: Create DMG
+      - name: List dist contents
         run: |
-          brew install create-dmg
-          create-dmg \
-            --volname "Chzzk Downloader" \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --app-drop-link 450 150 \
-            ChzzkDownloader-macOS.dmg \
-            dist/ChzzkDownloader.app
+          ls -la dist/
+      
+      - name: Create ZIP (skip DMG for now)
+        run: |
+          cd dist
+          zip -r ../ChzzkDownloader-macOS.zip ChzzkDownloader.app
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ChzzkDownloader-macOS
-          path: ChzzkDownloader-macOS.dmg
+          path: ChzzkDownloader-macOS.zip
 
   release:
     needs: [build-windows, build-macos]
@@ -78,21 +84,21 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download Windows artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: ChzzkDownloader-Windows
       
       - name: Download macOS artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: ChzzkDownloader-macOS
       
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             ChzzkDownloader-Windows.zip
-            ChzzkDownloader-macOS.dmg
+            ChzzkDownloader-macOS.zip
           draft: false
           prerelease: false
         env:
