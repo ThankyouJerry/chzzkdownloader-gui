@@ -1,0 +1,83 @@
+name: Build Windows Only
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller build.spec
+      
+      - name: List dist contents
+        run: |
+          dir dist
+      
+      - name: Create ZIP archive
+        run: |
+          Compress-Archive -Path dist\ChzzkDownloader\* -DestinationPath ChzzkDownloader-Windows.zip
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChzzkDownloader-Windows
+          path: ChzzkDownloader-Windows.zip
+
+  release:
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ChzzkDownloader-Windows
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ChzzkDownloader-Windows.zip
+          body: |
+            ## 🎥 Chzzk Downloader GUI
+            
+            ### Windows
+            - ChzzkDownloader-Windows.zip (자동 빌드)
+            
+            ### macOS
+            - macOS 버전은 기존 Release의 로컬 빌드를 사용하세요
+            - 또는 Python으로 실행 (권장)
+            
+            ### Python 실행 (모든 플랫폼)
+            ```bash
+            git clone https://github.com/SamKSH/chzzkdownloader-gui.git
+            cd chzzkdownloader-gui
+            pip install -r requirements.txt
+            python src/main.py
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
