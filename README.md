@@ -29,71 +29,110 @@
 - 📊 **실시간 진행률** - 다운로드 속도, 진행률, 남은 시간 표시
 - 🖥️ **크로스 플랫폼** - Windows, macOS, Linux 지원
 
-## 📥 다운로드
+## 📥 다운로드 및 설치
 
-### 방법 1: 실행 파일 다운로드 (권장)
-
-> **가장 쉬운 방법!** Python 설치 없이 바로 사용 가능합니다.
-
-#### Windows
-1. [Releases](https://github.com/YOUR_USERNAME/chzzk-downloader-gui/releases) 페이지에서 최신 버전 다운로드
-2. `ChzzkDownloader-Windows.zip` 다운로드 및 압축 해제
-3. `ChzzkDownloader.exe` 실행
-
-#### macOS
-1. [Releases](https://github.com/YOUR_USERNAME/chzzk-downloader-gui/releases) 페이지에서 최신 버전 다운로드
-2. `ChzzkDownloader-macOS.dmg` 다운로드
-3. DMG 파일을 열고 애플리케이션을 Applications 폴더로 드래그
-4. 애플리케이션 실행
-
-> ⚠️ **macOS 보안 경고**: 처음 실행 시 "확인되지 않은 개발자" 경고가 뜰 수 있습니다.
-> 
-> **해결 방법**: `시스템 환경설정` → `보안 및 개인 정보 보호` → `확인 없이 열기` 클릭
-
----
-
-### 방법 2: Python으로 직접 실행
+### 방법 1: Python으로 실행 (권장)
 
 Python이 설치되어 있다면 소스 코드를 직접 실행할 수 있습니다.
 
-#### 1. 저장소 복제
+#### 1. Python 설치 확인
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/chzzk-downloader-gui.git
-cd chzzk-downloader-gui
+python3 --version
+# 또는
+python --version
 ```
 
-#### 2. 의존성 설치
+Python 3.8 이상이 필요합니다. 없다면 [python.org](https://www.python.org/downloads/)에서 다운로드하세요.
+
+#### 2. 저장소 복제
 
 ```bash
+git clone https://github.com/SamKSH/chzzkdownloader-gui.git
+cd chzzkdownloader-gui
+```
+
+또는 ZIP 다운로드:
+1. https://github.com/SamKSH/chzzkdownloader-gui 접속
+2. 녹색 "Code" 버튼 → "Download ZIP"
+3. 압축 해제 후 터미널에서 해당 폴더로 이동
+
+#### 3. 의존성 설치
+
+```bash
+pip3 install -r requirements.txt
+# 또는
 pip install -r requirements.txt
 ```
 
-#### 3. 실행
+**필요한 패키지:**
+- PyQt6 (GUI 프레임워크)
+- yt-dlp (다운로드 엔진)
+- requests (HTTP 요청)
+
+#### 4. 실행
 
 ```bash
+python3 src/main.py
+# 또는
 python src/main.py
 ```
 
 ---
 
+### 방법 2: 실행 파일 사용
+
+Python 설치 없이 바로 사용하고 싶다면:
+
+1. [Releases](https://github.com/SamKSH/chzzkdownloader-gui/releases) 페이지 접속
+2. 최신 버전에서 OS에 맞는 파일 다운로드
+   - **macOS**: `ChzzkDownloader-macOS.zip`
+   - **Windows**: `ChzzkDownloader-Windows.zip` (GitHub Actions로 자동 빌드)
+3. 압축 해제 후 실행
+
+**macOS 보안 경고 해결:**
+```bash
+# 터미널에서 실행
+xattr -cr ChzzkDownloader.app
+```
+
+또는 `시스템 환경설정` → `보안 및 개인 정보 보호` → `확인 없이 열기`
+
+---
+
 ## 🎯 사용 방법
 
-### 1. 기본 다운로드
+### 1. 프로그램 실행
+
+```bash
+python3 src/main.py
+```
+
+### 2. 기본 다운로드
 
 1. **URL 입력**: 치지직 VOD 또는 클립 URL을 입력창에 붙여넣기
    - VOD 예시: `https://chzzk.naver.com/video/12345`
    - 클립 예시: `https://chzzk.naver.com/clips/abcde`
 
 2. **정보 가져오기**: "정보 가져오기" 버튼 클릭
+   - 영상 제목, 길이, 썸네일 표시
+   - 사용 가능한 화질 목록 표시
 
-3. **화질 선택**: 드롭다운에서 원하는 해상도 선택 (1080p, 720p, 480p 등)
+3. **화질 선택**: 드롭다운에서 원하는 해상도 선택
+   - 1080p 60fps (최고 화질)
+   - 1080p
+   - 720p
+   - 480p
+   - 360p
 
 4. **다운로드**: "다운로드" 버튼 클릭
+   - 실시간 진행률 표시
+   - 다운로드 속도 표시
+   - 남은 시간 표시
 
 5. **완료**: 다운로드가 완료되면 "파일 열기" 버튼으로 바로 재생 가능
 
-### 2. 연령 제한 컨텐츠 다운로드
+### 3. 연령 제한 컨텐츠 다운로드
 
 일부 영상은 네이버 로그인이 필요합니다. 쿠키를 설정하면 다운로드할 수 있습니다.
 
@@ -113,11 +152,33 @@ python src/main.py
 3. `NID_AUT`와 `NID_SES` 값 붙여넣기
 4. **저장** 클릭
 
-### 3. 다운로드 파일 위치
+### 4. 다운로드 파일 위치
 
 - **기본 경로**: `~/Downloads/ChzzkDownloads`
 - **파일명 형식**: `영상제목_1080p.mp4`
 - **설정 변경**: 메뉴 → 파일 → 설정 → 일반 탭
+
+---
+
+## 💡 사용 팁
+
+### 최고 화질로 다운로드
+
+- 항상 **1080p 60fps** 또는 **1080p** 선택
+- 원본 화질 그대로 다운로드됨
+- 모든 플레이어에서 재생 가능 (VLC, IINA, QuickTime 등)
+
+### 여러 영상 다운로드
+
+1. 첫 번째 영상 다운로드 시작
+2. 다운로드 진행 중에도 새 URL 입력 가능
+3. 순차적으로 다운로드됨
+
+### 다운로드 속도 향상
+
+- 안정적인 인터넷 연결 사용
+- VPN 사용 시 비활성화
+- 다른 다운로드 프로그램 종료
 
 ---
 
