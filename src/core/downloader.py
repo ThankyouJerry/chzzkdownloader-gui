@@ -27,7 +27,9 @@ class DownloadWorker(QThread):
         cookies: str = "",
         use_manual_download: bool = False,
         video_id: Optional[str] = None,
-        quality: Optional[str] = None
+        quality: Optional[str] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
     ):
         super().__init__()
         self.url = url
@@ -36,6 +38,8 @@ class DownloadWorker(QThread):
         self.use_manual_download = use_manual_download
         self.video_id = video_id
         self.quality = quality
+        self.start_time = start_time
+        self.end_time = end_time
         self.should_stop = False
         self.cookie_file = None
     
@@ -71,7 +75,7 @@ class DownloadWorker(QThread):
                 # Extract Master Playlist URL first
                 m3u8_url = api.get_master_playlist_url(fresh_metadata)
                 
-                # Fallback to direct media URL if master not available (for old VODs maybe?)
+                # Fallback to direct media URL if master not available
                 if not m3u8_url:
                     m3u8_url = api.get_m3u8_url(fresh_metadata, self.quality)
                 
@@ -87,7 +91,7 @@ class DownloadWorker(QThread):
                 if self.should_stop:
                     raise Exception("Download cancelled by user")
                 
-                progress = int((current / total) * 100)
+                progress = int((current / total) * 100) if total > 0 else 0
                 self.progress_updated.emit(progress, 0, 0)
                 self.status_changed.emit(f"다운로드 중... ({current}/{total} 세그먼트)")
             
@@ -114,7 +118,9 @@ class DownloadWorker(QThread):
                     progress_callback,
                     headers=headers,
                     cookies=cookies_dict,
-                    target_quality=self.quality
+                    target_quality=self.quality,
+                    start_time=self.start_time,
+                    end_time=self.end_time
                 )
             )
             
@@ -153,6 +159,17 @@ class DownloadWorker(QThread):
                     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
                 }
             }
+            
+            # Add range download support
+            if self.start_time is not None or self.end_time is not None:
+                def download_ranges_callback(info_dict, ydl):
+                    return [{
+                        'start_time': self.start_time if self.start_time is not None else 0,
+                        'end_time': self.end_time if self.end_time is not None else float('inf')
+                    }]
+                ydl_opts['download_ranges'] = download_ranges_callback
+                # Force keyframes at cuts for precision (optional, might re-encode)
+                # ydl_opts['force_keyframes_at_cuts'] = True 
             
             if self.cookie_file:
                 ydl_opts['cookiefile'] = self.cookie_file.name
@@ -244,7 +261,9 @@ class DownloadManager(QObject):
         quality: str,
         output_dir: Path,
         cookies: str = "",
-        use_manual_download: bool = False
+        use_manual_download: bool = False,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
     ) -> str:
         """
         Start a new download
@@ -257,6 +276,8 @@ class DownloadManager(QObject):
             output_dir: Output directory
             cookies: Cookie string
             use_manual_download: Whether to use manual segment download
+            start_time: Start time in seconds
+            end_time: End time in seconds
         
         Returns:
             download_id
@@ -265,7 +286,16 @@ class DownloadManager(QObject):
         
         # Sanitize filename and add quality
         safe_title = self._sanitize_filename(title)
-        filename = f"{safe_title}_{quality}"
+        
+        # Add part info to filename if range download
+        filename_suffix = quality
+        if start_time is not None:
+             # Just a simple check to differentiate, exact part name is handled by caller in title usually,
+             # but we can append range info or rely on title passed being unique.
+             # Ideally title passed to this function should already distinguish the part.
+             pass
+             
+        filename = f"{safe_title}_{filename_suffix}"
         output_path = str(output_dir / filename)
         
         # Create worker
@@ -275,7 +305,9 @@ class DownloadManager(QObject):
             cookies, 
             use_manual_download=use_manual_download,
             video_id=video_id,
-            quality=quality
+            quality=quality,
+            start_time=start_time,
+            end_time=end_time
         )
         self.active_downloads[download_id] = worker
         

@@ -6,6 +6,7 @@ import sys
 import subprocess
 import platform
 import os
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox,
@@ -203,6 +204,12 @@ class MainWindow(QMainWindow):
         self.status_indicator.setToolTip("확인 중...")
         self.status_message_label.setVisible(False)
         
+        # Hide info sections
+        self.info_container.setVisible(False)
+        self.part_selector.setVisible(False)
+        self.quality_frame.setVisible(False)
+        self.download_btn.setEnabled(False)
+        
         if not url:
             self.status_indicator.setText("🔴")
             self.status_indicator.setToolTip("URL을 입력해주세요")
@@ -249,22 +256,27 @@ class MainWindow(QMainWindow):
             self.fetch_button.setText("정보 가져오기")
     
     def _display_metadata(self, metadata: dict):
-        """Display video metadata in UI"""
-        # Show info section
-        self.info_group.setVisible(True)
+        """Display fetched metadata"""
+        self.current_metadata = metadata
         
-        # Set title
-        self.title_label.setText(metadata['title'])
+        # Show info sections
+        self.info_container.setVisible(True)
+        self.part_selector.setVisible(True)
+        self.quality_frame.setVisible(True)
         
-        # Set meta info
-        duration_min = metadata['duration'] // 60
-        duration_sec = metadata['duration'] % 60
-        self.meta_label.setText(
-            f"채널: {metadata['channel_name']} | "
-            f"길이: {duration_min}분 {duration_sec}초"
-        )
+        # Update text info
+        self.video_title.setText(metadata['title'])
+        self.channel_name.setText(metadata['channel_name'])
         
-        # Update download availability indicator
+        # Format publish date if available, otherwise use empty string
+        publish_date = metadata.get('publish_date', '')
+        self.video_date.setText(publish_date)
+        
+        # Update Part Selector with duration
+        duration = metadata.get('duration', 0)
+        self.part_selector.set_duration(duration)
+        
+        # Update status indicator
         is_downloadable = metadata.get('is_downloadable', False)
         vod_status = metadata.get('vod_status', 'UNKNOWN')
         
@@ -272,8 +284,8 @@ class MainWindow(QMainWindow):
             self.status_indicator.setText("🟢")
             self.status_indicator.setToolTip("다운로드 가능")
             self.status_message_label.setVisible(False)
-            self.download_button.setEnabled(True)
-            self.download_button.setText("다운로드")
+            self.download_btn.setEnabled(True)
+            self.download_btn.setText("다운로드")
         else:
             # Fast replay / upload state - Manual download available
             self.status_indicator.setText("🟠")
@@ -293,57 +305,112 @@ class MainWindow(QMainWindow):
                 f"수동 다운로드 모드로 진행됩니다.\n"
                 f"속도가 느릴 수 있으며, 완료까지 시간이 걸립니다."
             )
-            self.download_button.setEnabled(True)
-            self.download_button.setText("수동 다운로드 시작")
+            self.download_btn.setEnabled(True)
+            self.download_btn.setText("수동 다운로드 시작")
         
-        # Populate quality combo
+        # Load thumbnail async (assuming _load_thumbnail exists or will be added)
+        # For now, just set a placeholder or handle it if it's not critical
+        # self._load_thumbnail(metadata['thumbnail']) 
+        # Placeholder for thumbnail loading
+        pixmap = QPixmap()
+        if pixmap.loadFromData(self.api.get_thumbnail_data(metadata.get('thumbnail', ''))):
+            self.thumbnail_label.setPixmap(pixmap.scaled(self.thumbnail_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.thumbnail_label.setText("No Thumbnail")
+        
+        # Update quality combo
         self.quality_combo.clear()
         for res in metadata['resolutions']:
             self.quality_combo.addItem(
                 f"{res['label']} ({res.get('bitrate', 0) // 1000} kbps)",
-                res
+                res # Store the full resolution dict as data
             )
     
     def _start_download(self):
-        """Start downloading the video"""
+        """Start the download process"""
         if not self.current_metadata:
             return
-        
+            
         # Get selected quality
         selected_res = self.quality_combo.currentData()
         if not selected_res:
             QMessageBox.warning(self, "오류", "화질을 선택해주세요.")
             return
         
-        # Get download path
-        download_path = self.config.get_download_path()
+        url = selected_res['url'] # Use the URL from the selected resolution
+        quality_label = selected_res['label'] # Use the label for display
+        title = self.current_metadata['title']
+        video_id = self.current_metadata['id']
+        
+        # Check if manual download is needed
+        # VOD_ON_AIR (live rewind) or manual flag overrides yt-dlp
+        use_manual_download = (
+            self.current_metadata.get('vod_status') != 'ABR_HLS' and self.current_metadata.get('type') == 'vod'
+        )
+        
+        # Check split download
+        selected_parts = self.part_selector.get_selected_ranges()
+        
+        if not selected_parts:
+            # Download full video
+            self._initiate_download(video_id, url, title, quality_label, use_manual_download)
+        else:
+            # Download selected parts
+            for i, part in enumerate(selected_parts):
+                part_title = f"{title} (Part {i+1})" # Use i+1 for part number
+                self._initiate_download(
+                    video_id, 
+                    url, 
+                    part_title, 
+                    quality_label, 
+                    use_manual_download,
+                    start_time=part['start'],
+                    end_time=part['end']
+                )
+        
+        # Show confirmation
+        QMessageBox.information(
+            self,
+            "다운로드 시작",
+            f"다운로드가 시작되었습니다!\n저장 위치: {self.download_path}"
+        )
+        
+    def _initiate_download(
+        self, 
+        video_id, 
+        url, 
+        title, 
+        quality, 
+        use_manual, 
+        start_time=None, 
+        end_time=None
+    ):
+        """Helper to start a single download task"""
+        # Create output directory if not exists
+        output_dir = Path(self.download_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         # Get cookies
         cookies = self.config.get_cookies()
         
-        # Prepare download parameters
-        use_manual_download = False
-        
-        # Check if manual download is needed (for fast replay videos)
-        if self.current_metadata.get('vod_status') != 'ABR_HLS' and self.current_metadata.get('type') == 'vod':
-            use_manual_download = True
-
         # Start download
         download_id = self.download_manager.start_download(
-            video_id=self.current_metadata['id'],
-            url=selected_res['url'],
-            title=self.current_metadata['title'],
-            quality=selected_res['label'],  # Pass quality label (e.g., "1080p")
-            output_dir=download_path,
+            video_id=video_id,
+            url=url,
+            title=title,
+            quality=quality,
+            output_dir=str(output_dir), # Pass as string
             cookies=cookies,
-            use_manual_download=use_manual_download
+            use_manual_download=use_manual,
+            start_time=start_time,
+            end_time=end_time
         )
         
-        # Create download widget
+        # Create UI item
         widget = DownloadItemWidget(
             download_id=download_id,
-            title=self.current_metadata['title'],
-            thumbnail_url=self.current_metadata.get('thumbnail', '')
+            title=title,
+            thumbnail_url=self.current_metadata.get('thumbnail', '') # Use current metadata thumbnail
         )
         
         # Connect signals
@@ -368,13 +435,6 @@ class MainWindow(QMainWindow):
         
         self.download_widgets[download_id] = (item, widget)
         
-        # Show confirmation
-        QMessageBox.information(
-            self,
-            "다운로드 시작",
-            f"다운로드가 시작되었습니다!\n저장 위치: {download_path}"
-        )
-    
     def _cancel_download(self, download_id: str):
         """Cancel a download"""
         self.download_manager.cancel_download(download_id)

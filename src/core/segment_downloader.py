@@ -25,7 +25,9 @@ class SegmentDownloader:
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         max_segments: Optional[int] = None,
-        target_quality: Optional[str] = None
+        target_quality: Optional[str] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
     ) -> str:
         """
         Download video by fetching segments manually
@@ -38,6 +40,8 @@ class SegmentDownloader:
             cookies: HTTP cookies to use
             max_segments: Maximum number of segments to download (for testing)
             target_quality: Target quality (e.g. "1080p") if m3u8_url is a master playlist
+            start_time: Start time in seconds
+            end_time: End time in seconds
         
         Returns:
             Path to downloaded file
@@ -75,10 +79,32 @@ class SegmentDownloader:
             
             # Extract segments
             init_segment = manifest.get('init_segment')
-            media_segments = manifest.get('media_segments', [])
+            all_segments = manifest.get('media_segments', [])
             
-            if not media_segments:
+            if not all_segments:
                 raise Exception("No media segments found in m3u8")
+            
+            # Filter segments by time range if specified
+            media_segments = []
+            if start_time is not None or end_time is not None:
+                current_time = 0.0
+                for seg in all_segments:
+                    duration = seg.get('duration', 0)
+                    segment_end_time = current_time + duration
+                    
+                    # Check if segment overlaps with requested range
+                    in_range = True
+                    if start_time is not None and segment_end_time <= start_time:
+                        in_range = False
+                    if end_time is not None and current_time >= end_time:
+                        in_range = False
+                        
+                    if in_range:
+                        media_segments.append(seg['url'])
+                    
+                    current_time += duration
+            else:
+                media_segments = [s['url'] for s in all_segments]
             
             # Apply max_segments limit for testing
             if max_segments and max_segments < len(media_segments):
@@ -166,11 +192,12 @@ class SegmentDownloader:
         return None
     
     def _parse_m3u8(self, content: str) -> Dict:
-        """Parse m3u8 content"""
+        """Parse m3u8 content including durations"""
         lines = content.strip().split('\n')
         
         init_segment = None
         media_segments = []
+        current_duration = 0.0
         
         for i, line in enumerate(lines):
             line = line.strip()
@@ -181,9 +208,22 @@ class SegmentDownloader:
                 if uri_match:
                     init_segment = uri_match.group(1)
             
+            # Find duration
+            elif line.startswith('#EXTINF:'):
+                # Format: #EXTINF:4.000000,
+                try:
+                    duration_str = line.split(':')[1].split(',')[0]
+                    current_duration = float(duration_str)
+                except:
+                    current_duration = 0.0
+            
             # Find media segments
             elif line and not line.startswith('#'):
-                media_segments.append(line)
+                media_segments.append({
+                    'url': line,
+                    'duration': current_duration
+                })
+                current_duration = 0.0
         
         return {
             'init_segment': init_segment,
