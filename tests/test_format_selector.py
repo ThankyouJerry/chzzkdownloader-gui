@@ -27,11 +27,11 @@ class FinalCutFormatSelectorTests(unittest.TestCase):
         self.assertIn('bestaudio[ext=m4a]', selector)
 
     def test_detects_supported_youtube_hosts(self):
-        self.assertTrue(is_youtube_url('https://www.youtube.com/watch?v=test'))
-        self.assertTrue(is_youtube_url('https://youtu.be/test'))
-        self.assertTrue(is_youtube_url('https://WWW.YOUTUBE.COM/watch?v=test'))
+        self.assertTrue(is_youtube_url('https://www.youtube.com/watch?v=dQw4w9WgXcQ'))
+        self.assertTrue(is_youtube_url('https://youtu.be/dQw4w9WgXcQ'))
+        self.assertTrue(is_youtube_url('https://WWW.YOUTUBE.COM/watch?v=dQw4w9WgXcQ'))
         self.assertFalse(is_youtube_url('https://chzzk.naver.com/video/1'))
-        self.assertFalse(is_youtube_url('https://notyoutube.com/watch?v=test'))
+        self.assertFalse(is_youtube_url('https://notyoutube.com/watch?v=dQw4w9WgXcQ'))
 
     def test_does_not_change_chzzk_format_selection(self):
         original = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'

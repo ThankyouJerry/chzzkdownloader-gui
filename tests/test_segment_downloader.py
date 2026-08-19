@@ -1,4 +1,6 @@
 import unittest
+import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -52,7 +54,11 @@ class SegmentRangeTests(unittest.TestCase):
 
             completed = subprocess.CompletedProcess([], 0, '', '')
             with patch('core.ffmpeg_utils.get_ffmpeg_binary', return_value='ffmpeg'), \
-                    patch('subprocess.run', return_value=completed) as run:
+                    patch.object(
+                        SegmentDownloader,
+                        '_run_process',
+                        return_value=completed,
+                    ) as run:
                 SegmentDownloader()._combine_segments(
                     init_path,
                     [segment_path],
@@ -66,6 +72,16 @@ class SegmentRangeTests(unittest.TestCase):
             self.assertIn('aac', trim_command)
             self.assertEqual(trim_command[trim_command.index('-ss') + 1], '3.000000')
             self.assertEqual(trim_command[trim_command.index('-t') + 1], '5.000000')
+
+    def test_ffmpeg_process_can_be_cancelled_without_waiting_for_completion(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, '취소'):
+            SegmentDownloader._run_process(
+                [sys.executable, '-c', 'import time; time.sleep(30)'],
+                cancel_callback=lambda: True,
+            )
+
+        self.assertLess(time.monotonic() - started, 4.0)
 
     def test_rejects_start_beyond_hls_duration(self):
         with self.assertRaisesRegex(ValueError, '시작 시간'):
@@ -82,6 +98,27 @@ class SegmentRangeTests(unittest.TestCase):
                 start_time=0.0,
                 end_time=13.0,
             )
+
+    def test_scopes_login_cookies_to_naver_domains(self):
+        downloader = SegmentDownloader()
+        downloader.cookies = {"NID_AUT": "secret", "NID_SES": "secret"}
+
+        self.assertEqual(
+            downloader._cookies_for_url("https://apis.naver.com/path"),
+            downloader.cookies,
+        )
+        self.assertEqual(
+            downloader._cookies_for_url("https://vod.pstatic.net/path"),
+            {},
+        )
+        self.assertEqual(
+            downloader._cookies_for_url("https://evil.example/path"),
+            {},
+        )
+
+    def test_rejects_non_https_segment_urls(self):
+        with self.assertRaisesRegex(RuntimeError, "안전하지 않은"):
+            SegmentDownloader._validate_https_url("http://example.com/segment.m4s")
 
 
 if __name__ == '__main__':

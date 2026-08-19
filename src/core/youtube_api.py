@@ -1,19 +1,20 @@
 """
-YouTube API — 시스템 yt-dlp 바이너리를 사용한 메타데이터 추출
-Python yt_dlp 패키지(구버전)가 아닌 /opt/homebrew/bin/yt-dlp를 호출합니다.
+YouTube API - validated external yt-dlp metadata extraction with package fallback.
 """
 import json
-import re
 import subprocess
 from typing import Dict, List, Optional
 
 import yt_dlp
 
 from core.dependency_check import resolve_yt_dlp_binary
+from core.url_utils import parse_media_url
 
 
 class YouTubeAPI:
-    """YouTube video metadata extractor using system yt-dlp binary"""
+    """YouTube metadata extractor using the best available yt-dlp runtime."""
+
+    METADATA_TIMEOUT_SECONDS = 90
 
     # ── URL 파싱 ────────────────────────────────────────────────
 
@@ -23,40 +24,70 @@ class YouTubeAPI:
         YouTube URL에서 video ID를 추출합니다.
         지원: youtube.com/watch?v=, youtu.be/, youtube.com/shorts/
         """
-        m = re.search(
-            r'(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})',
-            url
-        )
-        if m:
-            return {'type': 'youtube', 'id': m.group(1), 'url': url}
+        parsed = parse_media_url(url)
+        if parsed and parsed.get('type') == 'youtube':
+            return parsed
         return None
 
     # ── 메타데이터 추출 ─────────────────────────────────────────
 
     def fetch_metadata(self, url: str) -> Dict:
         """
-        시스템 yt-dlp 바이너리로 YouTube 영상 메타데이터를 가져옵니다.
-        --dump-json 옵션을 통해 JSON으로 파싱합니다.
+        외부 yt-dlp 바이너리로 단일 영상 메타데이터를 가져오고,
+        사용할 수 없으면 번들된 Python 패키지로 전환합니다.
         """
+        parsed = self.parse_url(url)
+        if not parsed:
+            raise ValueError("올바른 YouTube HTTPS URL을 입력해주세요.")
+
         ytdlp_bin = resolve_yt_dlp_binary()
         if ytdlp_bin:
-            result = subprocess.run(
-                [ytdlp_bin, "--dump-json", "--no-warnings", url],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            try:
+                result = subprocess.run(
+                    [
+                        ytdlp_bin,
+                        "--ignore-config",
+                        "--dump-single-json",
+                        "--no-warnings",
+                        "--no-playlist",
+                        "--socket-timeout",
+                        "20",
+                        "--extractor-retries",
+                        "3",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.METADATA_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "YouTube 정보 요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+                ) from exc
             if result.returncode != 0:
-                err = result.stderr.strip()
-                raise Exception(f"YouTube 정보 가져오기 실패:\n{err}")
-            info = json.loads(result.stdout)
+                err = result.stderr.strip()[-1000:]
+                raise RuntimeError(f"YouTube 정보 가져오기 실패:\n{err}")
+            try:
+                info = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("YouTube 정보 응답 형식이 올바르지 않습니다.") from exc
         else:
             try:
-                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                with yt_dlp.YoutubeDL({
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "socket_timeout": 20,
+                    "extractor_retries": 3,
+                }) as ydl:
                     info = ydl.extract_info(url, download=False)
             except Exception as exc:
-                raise Exception(f"YouTube 정보 가져오기 실패:\n{exc}")
+                raise RuntimeError(f"YouTube 정보 가져오기 실패:\n{exc}") from exc
+
+        if not isinstance(info, dict):
+            raise RuntimeError("YouTube 정보 응답 형식이 올바르지 않습니다.")
 
         resolutions = self._extract_resolutions(info)
 

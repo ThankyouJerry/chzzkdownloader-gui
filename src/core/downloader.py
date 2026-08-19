@@ -3,6 +3,7 @@ Download Manager with automatic method selection
 """
 import os
 import re
+import signal
 import subprocess
 import threading
 import uuid
@@ -10,29 +11,13 @@ import tempfile
 import asyncio
 from pathlib import Path
 from typing import Dict, Optional
-from urllib.parse import urlparse
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import yt_dlp
 
 from core.dependency_check import resolve_yt_dlp_binary
 from core.segment_downloader import SegmentDownloader
 from core.ffmpeg_utils import get_ffmpeg_binary
-
-
-YOUTUBE_HOST_MARKERS = (
-    'youtube.com',
-    'youtu.be',
-    'youtube-nocookie.com',
-)
-
-
-def is_youtube_url(url: str) -> bool:
-    """Return whether a URL should use YouTube-specific format selection."""
-    hostname = (urlparse(url or '').hostname or '').lower()
-    return any(
-        hostname == marker or hostname.endswith(f'.{marker}')
-        for marker in YOUTUBE_HOST_MARKERS
-    )
+from core.url_utils import is_youtube_url, parse_media_url
 
 
 def build_final_cut_format_selector(format_selector: Optional[str] = None) -> str:
@@ -106,49 +91,45 @@ class DownloadWorker(QThread):
     
     def _run_manual_download(self):
         """Run manual segment download"""
+        loop = asyncio.new_event_loop()
         try:
             self.status_changed.emit("수동 다운로드 시작 중...")
-            
-            # Create event loop for async operations
-            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            # Fetch fresh m3u8 URL (signatures expire quickly)
+
+            # Signed HLS URLs expire quickly, so refresh metadata immediately
+            # before starting the fallback segment downloader.
             from core.chzzk_api import ChzzkAPI
             api = ChzzkAPI()
-            
-            try:
-                # Get fresh metadata with valid m3u8 URL
-                fresh_metadata = loop.run_until_complete(
-                    api.fetch_vod_metadata(self.video_id, self.cookies_header)
+            fresh_metadata = loop.run_until_complete(
+                api.fetch_vod_metadata(self.video_id, self.cookies_header)
+            )
+
+            if fresh_metadata.get("vod_status") == "ABR_HLS":
+                self.url = fresh_metadata.get("url", self.url)
+                self.status_changed.emit(
+                    "VOD 변환 완료: yt-dlp 방식으로 전환합니다..."
                 )
-                
-                # Extract Master Playlist URL first
-                m3u8_url = api.get_master_playlist_url(fresh_metadata)
-                
-                # Fallback to direct media URL if master not available
-                if not m3u8_url:
-                    m3u8_url = api.get_m3u8_url(fresh_metadata, self.quality)
-                
-                if not m3u8_url:
-                    raise Exception("Failed to extract m3u8 URL from metadata")
-                    
-            except Exception as e:
-                raise Exception(f"Failed to fetch fresh m3u8 URL: {str(e)}")
-            
+                self._run_ytdlp_download()
+                return
+
+            m3u8_url = api.get_master_playlist_url(fresh_metadata)
+            if not m3u8_url:
+                raise RuntimeError(
+                    "현재 다운로드 가능한 서명된 HLS 재생목록을 찾지 못했습니다."
+                )
+
             downloader = SegmentDownloader()
-            
+
             def progress_callback(current, total):
                 if self.should_stop:
-                    raise Exception("Download cancelled by user")
-                
+                    raise RuntimeError("사용자가 다운로드를 취소했습니다.")
                 progress = int((current / total) * 100) if total > 0 else 0
                 self.progress_updated.emit(progress, 0, 0)
                 self.status_changed.emit(f"다운로드 중... ({current}/{total} 세그먼트)")
-            
+
             # Parse cookies
             cookies_dict = self._parse_cookie_header(self.cookies_header)
-            
+
             # Use same headers as yt-dlp
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -156,7 +137,6 @@ class DownloadWorker(QThread):
                 'Origin': 'https://chzzk.naver.com'
             }
             
-            # Run async download
             output_path = loop.run_until_complete(
                 downloader.download_video(
                     m3u8_url,
@@ -166,33 +146,56 @@ class DownloadWorker(QThread):
                     cookies=cookies_dict,
                     target_quality=self.quality,
                     start_time=self.start_time,
-                    end_time=self.end_time
+                    end_time=self.end_time,
+                    cancel_callback=lambda: self.should_stop,
+                    process_callback=self._set_active_process,
                 )
             )
-            
-            loop.close()
-            
+
             self.status_changed.emit("완료")
             self.download_completed.emit(output_path)
-            
-        except Exception as e:
-            self.download_error.emit(f"수동 다운로드 실패: {str(e)}")
-    
+
+        except Exception as exc:
+            if not self.should_stop:
+                self.download_error.emit(f"수동 다운로드 실패: {str(exc)}")
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
     def _run_ytdlp_download(self):
         """Run yt-dlp download.
 
-        YouTube/Chzzk ABR_HLS: 시스템 yt-dlp 바이너리 사용.
-        패키지에 번들된 yt_dlp는 사이트 변경에 뒤처질 수 있어 Chzzk VOD도
-        format_selector가 넘어온 경우 최신 시스템 바이너리를 우선 사용한다.
+        The app-owned or system yt-dlp binary is preferred for every supported
+        service because the bundled Python package can lag behind site changes.
         """
-        is_youtube = is_youtube_url(self.url)
-        if (is_youtube or self.format_selector) and resolve_yt_dlp_binary():
+        self._refresh_clip_stream_url()
+        if resolve_yt_dlp_binary():
             self._run_ytdlp_binary_download()
         else:
             self._run_ytdlp_package_download()
 
+    def _refresh_clip_stream_url(self):
+        """Resolve a fresh signed progressive URL for CHZZK clips."""
+        parsed = parse_media_url(self.url)
+        if not parsed or parsed.get("type") != "clip":
+            return
+
+        from core.chzzk_api import ChzzkAPI
+
+        metadata = asyncio.run(
+            ChzzkAPI().fetch_clip_metadata(parsed["id"], self.cookies_header)
+        )
+        resolutions = metadata.get("resolutions") or []
+        selected = next(
+            (item for item in resolutions if item.get("label") == self.quality),
+            resolutions[0] if resolutions else None,
+        )
+        if not selected or selected.get("url") == metadata.get("url"):
+            raise RuntimeError("치지직 클립의 다운로드 주소를 확인하지 못했습니다.")
+        self.url = selected["url"]
+
     def _run_ytdlp_binary_download(self):
-        """YouTube/Chzzk ABR_HLS 전용: 시스템 yt-dlp 바이너리로 다운로드"""
+        """Download with the validated app-owned or system yt-dlp binary."""
         import re as _re
         import os
 
@@ -204,7 +207,15 @@ class DownloadWorker(QThread):
         output_template = self.output_path + ".%(ext)s"
 
         # ── 명령어 구성 (URL은 반드시 마지막) ──────────────────
-        cmd = [ytdlp_bin]
+        cmd = [
+            ytdlp_bin,
+            "--ignore-config",
+            "--no-playlist",
+            "--socket-timeout", "30",
+            "--retries", "10",
+            "--fragment-retries", "10",
+            "--extractor-retries", "3",
+        ]
         fmt = select_download_format(self.url, self.format_selector)
         cmd += ["-f", fmt]
         cmd += ["--merge-output-format", "mp4"]
@@ -250,9 +261,15 @@ class DownloadWorker(QThread):
         print(f"DEBUG: Running yt-dlp binary: {' '.join(cmd)}")
         self.status_changed.emit("다운로드 시작 중...")
 
+        popen_kwargs = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+            **popen_kwargs,
         )
         self.process = proc
         if self.should_stop:
@@ -307,7 +324,7 @@ class DownloadWorker(QThread):
         output_path = self.output_path + ".mp4"
         for line in proc.stdout:
             if self.should_stop:
-                proc.terminate()
+                self._terminate_process_tree(proc)
                 return
 
             line = line.strip()
@@ -375,7 +392,7 @@ class DownloadWorker(QThread):
 
 
     def _run_ytdlp_package_download(self):
-        """Chzzk 전용: Python yt_dlp 패키지로 다운로드"""
+        """Fallback download using the bundled Python yt_dlp package."""
         actual_output_path = None
         
         try:
@@ -398,6 +415,11 @@ class DownloadWorker(QThread):
                 'progress_hooks': [self._progress_hook],
                 'quiet': True,
                 'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 30,
+                'retries': 10,
+                'fragment_retries': 10,
+                'extractor_retries': 3,
                 'ffmpeg_location': ffmpeg_path,
                 'postprocessors': [{
                     'key': 'FFmpegVideoConvertor',
@@ -416,6 +438,7 @@ class DownloadWorker(QThread):
                         'end_time': self.end_time if self.end_time is not None else float('inf')
                     }]
                 ydl_opts['download_ranges'] = download_ranges_callback
+                ydl_opts['force_keyframes_at_cuts'] = True
             
             if self.cookie_file:
                 ydl_opts['cookiefile'] = self.cookie_file.name
@@ -486,20 +509,48 @@ class DownloadWorker(QThread):
         if not process or process.poll() is not None:
             return
 
-        try:
-            process.terminate()
-        except OSError:
-            return
+        self._terminate_process_tree(process)
 
         def force_kill_if_needed():
             threading.Event().wait(2)
             if process.poll() is None:
                 try:
-                    process.kill()
+                    self._terminate_process_tree(process, force=True)
                 except OSError:
                     pass
 
         threading.Thread(target=force_kill_if_needed, daemon=True).start()
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen, force: bool = False):
+        """Terminate yt-dlp and any ffmpeg child processes it started."""
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            command = ["taskkill", "/PID", str(process.pid), "/T"]
+            if force:
+                command.append("/F")
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+
+        try:
+            process_group = os.getpgid(process.pid)
+            if process_group == process.pid:
+                os.killpg(process_group, signal.SIGKILL if force else signal.SIGTERM)
+            elif force:
+                process.kill()
+            else:
+                process.terminate()
+        except (OSError, ProcessLookupError):
+            if force:
+                process.kill()
+            else:
+                process.terminate()
 
     def _cleanup_cookie_file(self):
         """Remove a temporary cookie file once a worker exits."""
@@ -508,6 +559,10 @@ class DownloadWorker(QThread):
                 os.remove(self.cookie_file.name)
             except OSError:
                 pass
+
+    def _set_active_process(self, process: Optional[subprocess.Popen]):
+        """Expose manual FFmpeg to the existing non-blocking cancel path."""
+        self.process = process
 
     @staticmethod
     def _parse_cookie_header(cookie_header: str) -> Dict[str, str]:

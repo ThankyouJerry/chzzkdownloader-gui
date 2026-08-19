@@ -10,10 +10,13 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap
 import os
 import urllib.request
+from urllib.parse import urlsplit
 
 class ThumbnailLoader(QThread):
     """Thread for loading thumbnail images"""
-    thumbnail_loaded = pyqtSignal(QPixmap)
+    thumbnail_loaded = pyqtSignal(str, bytes)
+
+    MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
     
     def __init__(self, url: str):
         super().__init__()
@@ -23,13 +26,18 @@ class ThumbnailLoader(QThread):
         """Download and load thumbnail"""
         try:
             if self.url:
-                data = urllib.request.urlopen(self.url, timeout=8).read()
-                pixmap = QPixmap()
-                pixmap.loadFromData(data)
-                if not pixmap.isNull():
-                    # Scale to fit thumbnail size while maintaining aspect ratio
-                    scaled = pixmap.scaled(160, 90, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                    self.thumbnail_loaded.emit(scaled)
+                request = urllib.request.Request(
+                    self.url,
+                    headers={"User-Agent": "ClipCatcher thumbnail loader"},
+                )
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    final_parts = urlsplit(response.geturl())
+                    if final_parts.scheme != "https" or not final_parts.hostname:
+                        raise RuntimeError("unsafe thumbnail redirect")
+                    data = response.read(self.MAX_THUMBNAIL_BYTES + 1)
+                if len(data) > self.MAX_THUMBNAIL_BYTES:
+                    raise RuntimeError("thumbnail is too large")
+                self.thumbnail_loaded.emit(self.url, data)
         except Exception as e:
             print(f"Failed to load thumbnail: {e}")
 
@@ -211,7 +219,17 @@ class DownloadItemWidget(QWidget):
         self.thumbnail_loader.thumbnail_loaded.connect(self._set_thumbnail)
         self.thumbnail_loader.start()
     
-    def _set_thumbnail(self, pixmap: QPixmap):
+    def _set_thumbnail(self, url: str, data: bytes):
         """Set the loaded thumbnail image"""
-        self.thumbnail_label.setPixmap(pixmap)
+        if url != self.thumbnail_url:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        scaled = pixmap.scaled(
+            self.thumbnail_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.thumbnail_label.setPixmap(scaled)
         self.thumbnail_label.setText("")  # Clear emoji text

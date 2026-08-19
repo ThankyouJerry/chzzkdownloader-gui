@@ -7,7 +7,7 @@ import subprocess
 import platform
 import os
 from pathlib import Path
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox,
@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction, QPixmap
 from qasync import asyncSlot
 
-from ui.download_item import DownloadItemWidget
+from ui.download_item import DownloadItemWidget, ThumbnailLoader
 from ui.settings_dialog import SettingsDialog
 from ui.time_range_widget import TimeRangeWidget
 from core.chzzk_api import ChzzkAPI
@@ -27,6 +27,19 @@ from core.config import Config
 from core.dependency_check import get_missing_dependencies
 from core.app_tools import find_app_tool, get_app_bin_dir, install_or_update_yt_dlp
 from core.dependency_check import is_yt_dlp_binary_usable
+
+
+class YtDlpInstallWorker(QThread):
+    """Install the app-owned yt-dlp without blocking the GUI event loop."""
+
+    completed = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        try:
+            self.completed.emit(install_or_update_yt_dlp())
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -42,6 +55,8 @@ class MainWindow(QMainWindow):
         self.download_widgets = {}  # download_id -> {item, widget, bucket}
         self.pending_download_ids = []
         self.running_download_ids = set()
+        self.thumbnail_loaders = []
+        self.ytdlp_install_worker = None
         self.max_concurrent_downloads = max(1, int(self.config.get("concurrent_downloads", 1)))
         
         # Load download path from config or default
@@ -436,14 +451,14 @@ class MainWindow(QMainWindow):
         # Load thumbnail
         thumbnail_url = metadata.get('thumbnail', '')
         if thumbnail_url:
-            import urllib.request
-            try:
-                data = urllib.request.urlopen(thumbnail_url).read()
-                pixmap = QPixmap()
-                if pixmap.loadFromData(data):
-                    self.thumbnail_label.setPixmap(pixmap.scaled(self.thumbnail_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            except Exception as e:
-                self.thumbnail_label.setText("No Thumbnail")
+            self.thumbnail_label.setText("Loading...")
+            loader = ThumbnailLoader(thumbnail_url)
+            self.thumbnail_loaders.append(loader)
+            loader.thumbnail_loaded.connect(self._set_main_thumbnail)
+            loader.finished.connect(
+                lambda current=loader: self._release_thumbnail_loader(current)
+            )
+            loader.start()
         else:
             self.thumbnail_label.setText("No Thumbnail")
         
@@ -454,6 +469,29 @@ class MainWindow(QMainWindow):
                 f"{res['label']} ({res.get('bitrate', 0) // 1000} kbps)",
                 res # Store the full resolution dict as data
             )
+
+    def _set_main_thumbnail(self, url: str, data: bytes):
+        """Decode and display thumbnail data on the GUI thread."""
+        if not self.current_metadata or self.current_metadata.get("thumbnail") != url:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            self.thumbnail_label.setText("No Thumbnail")
+            return
+        self.thumbnail_label.setPixmap(
+            pixmap.scaled(
+                self.thumbnail_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.thumbnail_label.setText("")
+
+    def _release_thumbnail_loader(self, loader: ThumbnailLoader):
+        """Keep QThreads alive until their network request has finished."""
+        if loader in self.thumbnail_loaders:
+            self.thumbnail_loaders.remove(loader)
+        loader.deleteLater()
     
     def _start_download(self):
         """Start the download process"""
@@ -485,7 +523,14 @@ class MainWindow(QMainWindow):
         # H.264/AAC constraints for YouTube to keep Final Cut compatibility.
         format_selector = None
         height = selected_res.get('height', 0)
-        if content_type == 'youtube' or (content_type == 'vod' and vod_status == 'ABR_HLS'):
+        if content_type == 'clip':
+            # The worker refreshes the short-lived signed progressive URL just
+            # before the queued task starts.
+            format_selector = 'best'
+            url = self.current_metadata.get('url', url)
+        elif content_type == 'youtube' or (
+            content_type == 'vod' and vod_status == 'ABR_HLS'
+        ):
             if height:
                 format_selector = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
             else:
@@ -636,6 +681,7 @@ class MainWindow(QMainWindow):
 
             queued = 0
             missing_url_count = 0
+            invalid_url_count = 0
             invalid_range_count = 0
             for moment in moments:
                 moment_url = moment.get("url") or moment.get("videoUrl") or fallback_url
@@ -649,13 +695,16 @@ class MainWindow(QMainWindow):
                     or video
                 )
                 parsed = self.api.parse_url(moment_url)
+                if not parsed:
+                    invalid_url_count += 1
+                    continue
                 video_id = (
                     moment.get("videoId")
                     or video_ref.get("id")
-                    or (parsed or {}).get("id")
+                    or parsed.get("id")
                     or "clipradar"
                 )
-                content_type = (parsed or {}).get("type", "vod")
+                content_type = parsed["type"]
                 vod_title = (
                     moment.get("videoTitle")
                     or moment.get("vodTitle")
@@ -717,6 +766,11 @@ class MainWindow(QMainWindow):
                 if invalid_range_count == len(moments):
                     raise ValueError(
                         "유효한 시작/종료 시간이 있는 구간이 없습니다. cutStartTimeSeconds/cutEndTimeSeconds 값을 확인해주세요."
+                    )
+                if invalid_url_count:
+                    raise ValueError(
+                        "지원하지 않거나 안전하지 않은 VOD URL이 포함되어 있습니다. "
+                        "CHZZK 또는 YouTube HTTPS 링크를 확인해주세요."
                     )
                 raise ValueError("유효한 시작/종료 시간이 있는 구간이 없습니다.")
 
@@ -939,7 +993,7 @@ class MainWindow(QMainWindow):
             "ClipCatcher 정보",
             "<h3>ClipCatcher</h3>"
             "<p>네이버 치지직 VOD 및 클립 다운로더</p>"
-            "<p>Version 2.0.9</p>"
+            "<p>Version 2.0.10</p>"
             "<p>PyQt6 기반 데스크톱 애플리케이션</p>"
         )
 
@@ -1019,21 +1073,48 @@ class MainWindow(QMainWindow):
 
     def _install_or_update_ytdlp(self):
         """Install or update yt-dlp in ClipCatcher's app-owned bin directory."""
-        try:
-            self.statusBar().showMessage("yt-dlp 설치/업데이트 중...")
-            path = install_or_update_yt_dlp()
+        if self.ytdlp_install_worker and self.ytdlp_install_worker.isRunning():
+            self.statusBar().showMessage("yt-dlp 설치/업데이트가 이미 진행 중입니다.", 3000)
+            return
+
+        worker = YtDlpInstallWorker(self)
+        self.ytdlp_install_worker = worker
+        worker.completed.connect(self._on_ytdlp_install_completed)
+        worker.failed.connect(self._on_ytdlp_install_failed)
+        worker.finished.connect(self._on_ytdlp_install_finished)
+        self.statusBar().showMessage("yt-dlp 설치/업데이트 중...")
+        worker.start()
+
+    def _on_ytdlp_install_completed(self, path: str):
+        QMessageBox.information(
+            self,
+            "yt-dlp 설치 완료",
+            f"yt-dlp를 설치/업데이트했습니다.\n\n{path}",
+        )
+
+    def _on_ytdlp_install_failed(self, error: str):
+        QMessageBox.warning(
+            self,
+            "yt-dlp 설치 실패",
+            "yt-dlp 설치/업데이트에 실패했습니다.\n\n"
+            f"{error}\n\n"
+            "네트워크 연결을 확인하거나 CLI 설치 방법을 사용해주세요.",
+        )
+
+    def _on_ytdlp_install_finished(self):
+        worker = self.ytdlp_install_worker
+        self.ytdlp_install_worker = None
+        self.statusBar().clearMessage()
+        if worker:
+            worker.deleteLater()
+
+    def closeEvent(self, event):
+        if self.ytdlp_install_worker and self.ytdlp_install_worker.isRunning():
             QMessageBox.information(
                 self,
-                "yt-dlp 설치 완료",
-                f"yt-dlp를 설치/업데이트했습니다.\n\n{path}"
+                "yt-dlp 설치 중",
+                "안전한 설치를 위해 yt-dlp 업데이트가 끝난 뒤 앱을 종료해주세요.",
             )
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "yt-dlp 설치 실패",
-                "yt-dlp 설치/업데이트에 실패했습니다.\n\n"
-                f"{str(e)}\n\n"
-                "네트워크 연결을 확인하거나 CLI 설치 방법을 사용해주세요."
-            )
-        finally:
-            self.statusBar().clearMessage()
+            event.ignore()
+            return
+        super().closeEvent(event)

@@ -4,8 +4,8 @@
 
 - Repository: `ThankyouJerry/ClipCatcher`
 - Default branch: `main`
-- Current app version: `2.0.8`
-- Latest published release: `v2.0.8`
+- Current app version: `2.0.10`
+- Latest published release: `v2.0.10`
 - GitHub Pages: `https://thankyoujerry.github.io/ClipCatcher/`
 
 ## Build Outputs
@@ -27,7 +27,7 @@ python src/main.py --smoke
 
 1. Confirm local source checks pass.
 2. Build or attach macOS asset.
-3. Push a new tag, for example `v2.0.8`.
+3. Push a new tag, for example `v2.0.11`.
 4. Confirm the Windows GitHub Actions build succeeds.
 5. Upload or replace the macOS asset on the release.
 6. Confirm README and GitHub Pages still point to the latest release page.
